@@ -1,7 +1,9 @@
-﻿input_file: "D:\\VirtualBox\\Windows 10\\Windows 10.vdi"
-output_dir: "D:\\output"
-block_size: 200000 # number of sectors per read. One sector is 512b 
+﻿input_file: "D:\\input.mfi"
+output_dir: "C:\\output"
+block_size: 1000000 # number of sectors per read. One sector is 512b 
+work_size: 128
 words_min: 10 # minimum number of words detected in a sector
 words_max: 15 # maximum number of words detected in a sector
-keywords: ["user", "password"] # list of keywords to search for
-match_all: true # if true, all keywords must be present in a sector to be considered, any otherwise
+keywords: [] # list of keywords to search for
+match_all: false # if true, all keywords must be present in a sector to be considered, any otherwise
+use_gpu: true # use GPU for processing

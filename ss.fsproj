@@ -3,16 +3,26 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
+    <UserSecretsId>33d72124-effe-4bbc-862e-b68b3001a3b0</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="Config.fs" />
+    <Compile Include="GPU.fs" />
+    <Compile Include="Zip.fs" />
+    <Compile Include="Searcher.fs" />
     <Content Include="config.yaml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Compile Include="Program.fs">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Compile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="config_secret.yaml">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
