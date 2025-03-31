@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <Compile Include="Config.fs" />
+    <Compile Include="IO.fs" />
     <Compile Include="GPU.fs" />
     <Compile Include="Zip.fs" />
     <Compile Include="Searcher.fs" />
