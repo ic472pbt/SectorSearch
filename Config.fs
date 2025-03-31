@@ -1,6 +1,9 @@
 ﻿[<AutoOpen>]
 module Config 
+    open System.IO
     open FSharp.Configuration
     type Config = YamlConfig<"config.yaml">
     let config = Config()
-    config.Load("config.yaml")
+    ["config_secret.yaml"; "config.yaml"]
+        |> List.find File.Exists
+        |> config.Load
