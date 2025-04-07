@@ -7,8 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="IStack.fs" />
     <Compile Include="Config.fs" />
     <Compile Include="IO.fs" />
+    <Compile Include="CPU.fs" />
     <Compile Include="GPU.fs" />
     <Compile Include="Zip.fs" />
     <Compile Include="Searcher.fs" />

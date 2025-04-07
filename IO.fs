@@ -12,6 +12,8 @@
     printfn "blocks: %i" blocks
     
     let sw = System.Diagnostics.Stopwatch.StartNew()
+
+    /// Read file in blocks. Each block size is proportional to 512 bytes.
     let readBlock = asyncSeq{
         let mutable position = 0L
         let mutable len = 0
@@ -22,7 +24,8 @@
         while len > 0 && len = readBlockSize do
             yield readBuffer, position
             let currentBlock = position / (int64) readBlockSize
-            printfn "position block: %i/%i (%.01f%%) speed: %.01fMb/s" 
+            System.Console.CursorLeft <- 0
+            printf "position block: %i/%i (%.01f%%) speed: %.01fMb/s" 
                 currentBlock blocks ((float)currentBlock/(float)blocks*100.0)
                 ((float) position / 1024.0 / 1024.0 / sw.Elapsed.TotalSeconds)
             position <- position + int64 length

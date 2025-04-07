@@ -208,12 +208,24 @@ let zipHeaderIdentifier() = MailboxProcessor<(byte[] * byte[] * int64) option>.S
 if are.Reset() then
     zipHeaderIdentifier.Post None
 if are.WaitOne() then*)
-let suspects =
-    identifyLFHPositions()
-        |> Seq.map (fun (position, fileName) -> position, (System.Text.Encoding.UTF8.GetString(fileName)))
-        |> Seq.filter(fun (_, fileName) -> fileName.EndsWith "document.xml")
-        |> Seq.toList
-//    |> Seq.iter(fun (position, fileName) ->
-//        printfn "position: %i, %s" position fileName)
-printXMLUncompressedContent suspects
+//let suspects =
+//    identifyLFHPositions()
+//        |> Seq.map (fun (position, fileName) -> position, (System.Text.Encoding.UTF8.GetString(fileName)))
+//        |> Seq.filter(fun (_, fileName) -> fileName.EndsWith "document.xml")
+//        |> Seq.toList
+////    |> Seq.iter(fun (position, fileName) ->
+////        printfn "position: %i, %s" position fileName)
+//printXMLUncompressedContent suspects
+let scanner = 
+    if config.use_gpu then
+        CPU.CPUStack(config.block_size, config.keywords, config.match_all)
+    else
+        CPU.CPUStack(config.block_size, config.keywords, config.match_all)
+
+readBlock
+    |> AsyncSeq.iterAsync (fun (buffer, position) -> async{
+            let! res = scanner.Scan(buffer, position)
+            resScanner.Post (res, buffer, position)
+        })
+    |> Async.RunSynchronously
 printfn "Elapsed: %A" sw.Elapsed
