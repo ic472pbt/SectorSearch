@@ -1,6 +1,13 @@
 ﻿module IO
+    open System
     open System.IO
     open FSharp.Control
+
+    let cts = new System.Threading.CancellationTokenSource()
+    type StorageMsg = 
+        | StoreSector of (byte[] * int * int64 * byte)
+        | Complete of AsyncReplyChannel<unit>
+
     let readBlockSize = config.block_size * 512
     printfn "read block: %i" readBlockSize
     
@@ -21,7 +28,7 @@
         use f = File.Open(config.input_file, FileMode.Open, FileAccess.Read)
         let! length = f.ReadAsync(readBuffer, 0, readBuffer.Length) |> Async.AwaitTask
         len <- length
-        while len > 0 && len = readBlockSize do
+        while len > 0 && len = readBlockSize && not cts.IsCancellationRequested do
             yield readBuffer, position
             let currentBlock = position / (int64) readBlockSize
             System.Console.CursorLeft <- 0
@@ -32,3 +39,27 @@
             let! length = f.ReadAsync(readBuffer, 0, readBuffer.Length) |> Async.AwaitTask
             len <- length
     }
+
+    let storeSector = MailboxProcessor<StorageMsg>.Start(fun inbox ->
+        let crlf = System.Text.Encoding.ASCII.GetBytes("\r\n")
+        let outputFile = Path.Combine(config.output_dir, "sectors_txt.bin")
+        let outputFileStream = File.Open(outputFile, FileMode.Create, FileAccess.Write)
+        let rec loop() = async {
+            let! msg = inbox.Receive()
+            match msg with
+            | Complete rc -> 
+                do! outputFileStream.FlushAsync() |> Async.AwaitTask
+                outputFileStream.Close()
+                rc.Reply()
+                return ()
+            | StoreSector (bytes, start, position, cnt) ->
+                // Write the bytes to the output file
+                let count = Text.Encoding.ASCII.GetBytes($"{position + int64 (start * 512)} cnt {cnt.ToString()}\r\n")
+                do! outputFileStream.WriteAsync(count, 0, count.Length) |> Async.AwaitTask
+                do! outputFileStream.WriteAsync(bytes, start, 512) |> Async.AwaitTask
+                outputFileStream.Write(crlf, 0, 2)
+                outputFileStream.Write(crlf, 0, 2)
+                return! loop()
+        }
+        loop()
+    )

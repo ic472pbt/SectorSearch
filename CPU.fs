@@ -5,22 +5,19 @@
     type CPUStack(blocks, needles: IList<string>, matchAll) =
         inherit IStack(blocks, needles)
 
-        let inspectSector(sector: Memory<byte>) =
+        let inspectSector(sector: ReadOnlyMemory<byte>) =
             let s = System.Text.Encoding.ASCII.GetString(sector.Span)
+            let utf16 = System.Text.Encoding.Unicode.GetString(sector.Span)
             if matchAll then
-                needles |> Seq.forall s.Contains
+                if (needles |> Seq.forall s.Contains) || (needles |> Seq.forall utf16.Contains) then needles.Count else 0
             else
-                needles |> Seq.exists s.Contains
+                (needles |> Seq.filter s.Contains |> Seq.length) + (needles |> Seq.filter utf16.Contains |> Seq.length)
                 
         override _.Scan(buffer: byte [], position: int64) =
             let sectors = buffer.Length / 512
-            /// store the result. Result is 1 if a needle is found, 0 otherwise
             [0..sectors - 1]
                 |> List.map (fun i -> async{
-                        let sector = new Memory<byte>(buffer, i * 512, 512)
-                        if inspectSector(sector) then
-                            return 1uy
-                        else
-                            return 0uy 
+                        let sector = ReadOnlyMemory<byte>(buffer, i * 512, 512)
+                        return inspectSector(sector) |> byte
                     })
                 |> Async.Parallel

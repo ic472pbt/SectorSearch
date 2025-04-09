@@ -5,5 +5,6 @@ work_size: 128
 words_min: 10 # minimum number of words detected in a sector
 words_max: 15 # maximum number of words detected in a sector
 keywords: [""] # list of keywords to search for
+min_words: 2 # filter by minimum number of words detected in a sector
 match_all: false # if true, all keywords must be present in a sector to be considered, any otherwise
 use_gpu: true # use GPU for processing

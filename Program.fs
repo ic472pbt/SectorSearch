@@ -11,6 +11,16 @@ type Msg =
     | MsgCompleteCluster of (byte[] * int64)
     | MsgIncompleteCluster of (byte[] * int64)
     | MsgMiss
+let cts = new System.Threading.CancellationTokenSource()
+
+let handleCancelKeyPress (args: ConsoleCancelEventArgs) =
+    printfn "Cancellation requested..."
+    IO.cts.Cancel()
+    cts.Cancel()
+    args.Cancel <- true
+
+printfn "Press Ctrl+C to cancel the operation."
+Console.CancelKeyPress.Add(handleCancelKeyPress)
 
 [<EntryPoint>]
 printfn "keywords : %A" config.keywords
@@ -216,6 +226,18 @@ if are.WaitOne() then*)
 ////    |> Seq.iter(fun (position, fileName) ->
 ////        printfn "position: %i, %s" position fileName)
 //printXMLUncompressedContent suspects
+let filterFound = MailboxProcessor<byte[] * byte[] * int64>.Start(fun inbox ->
+    let rec loop() = async {
+        let! (res, buffer, position) = inbox.Receive()
+        res |> Array.iteri (fun i wordsCount ->
+            if wordsCount > (byte)config.min_words then
+                storeSector.Post <| StoreSector(buffer, i * 512, position, wordsCount)
+        )
+        return! loop()
+    }
+    loop()
+)
+
 let scanner = 
     if config.use_gpu then
         CPU.CPUStack(config.block_size, config.keywords, config.match_all)
@@ -225,7 +247,10 @@ let scanner =
 readBlock
     |> AsyncSeq.iterAsync (fun (buffer, position) -> async{
             let! res = scanner.Scan(buffer, position)
-            resScanner.Post (res, buffer, position)
+            filterFound.Post (res, buffer, position)
         })
     |> Async.RunSynchronously
+    // wait for the writer to finish
+storeSector.PostAndReply Complete
+
 printfn "Elapsed: %A" sw.Elapsed
