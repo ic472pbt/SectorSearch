@@ -1,10 +1,68 @@
 ﻿module Zip
+    open System
     open System.IO    
     open System.IO.Compression
-    let fileName = Path.Combine(config.output_dir, $"offsets.adr")
+    let LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50u
+    let LOCAL_FILE_OFFSETS_FILENAME = "lh_offsets.adr"
+
+    type ZipOffsetStorageMsg = 
+        | StoreOffset of (int64 list * int64)
+        | CompleteStoreOffset of AsyncReplyChannel<unit>
+    let inline getBytes (i : int64) = BitConverter.GetBytes i
+
+    /// Store offsets of local zip file headers for later processing
+    let storeLocalHeaderOffset = MailboxProcessor<ZipOffsetStorageMsg>.Start(fun inbox ->
+        let fileName = Path.Combine(config.output_dir, LOCAL_FILE_OFFSETS_FILENAME)
+        let fileStream = File.OpenWrite(fileName)
+        let collectOffsets position = List.collect ((+) position >> getBytes >> Array.toList)
+        let rec loop(buffer: byte list) = async {
+            match! inbox.Receive() with
+            | StoreOffset (res, position) when buffer.Length > 256 -> 
+                do! fileStream.WriteAsync(buffer |> Array.ofList, 0, buffer.Length) |> Async.AwaitTask
+                let tail = collectOffsets position res
+                return! loop(tail)
+            | StoreOffset (res, position) -> 
+                let tail = collectOffsets position res
+                return! loop(buffer @ tail)            
+            | CompleteStoreOffset rc ->
+                do! fileStream.WriteAsync(buffer |> Array.ofList, 0, buffer.Length) |> Async.AwaitTask            
+                do! fileStream.FlushAsync() |> Async.AwaitTask
+                fileStream.Close()
+                rc.Reply()
+        }
+        loop([])
+    )
+
+    let detectLocalFileHeader (sector: ReadOnlyMemory<byte>, offset: int64) =
+        use ms = new MemoryStream(sector.ToArray())
+        use br = new BinaryReader(ms)
+        let indexes =
+            [0L .. int64(sector.Length - 5)]
+                |> List.choose (fun i ->
+                        ms.Seek(i, SeekOrigin.Begin) |> ignore
+                        let signature = br.ReadUInt32()
+                        if signature = LOCAL_FILE_HEADER_SIGNATURE then
+                            Some i
+                        else None
+                    )
+        if indexes.Length > 0 then
+            storeLocalHeaderOffset.Post(StoreOffset(indexes, offset))
+
+    let scanForLocalFileHeader(buffer: byte [], position: int64) =
+            let sectors = buffer.Length / 512
+            [0..sectors - 1]
+                |> List.map (fun i -> async {
+                        let offset = i * 512
+                        let sector = ReadOnlyMemory<byte>(buffer, offset, 512)
+                        detectLocalFileHeader(sector, position + int64 offset)
+                    })
+                |> Async.Parallel
+                |> Async.Ignore
+
+    let fileName = Path.Combine(config.output_dir, LOCAL_FILE_OFFSETS_FILENAME)
     let identifyLocalFileHeader (reader: BinaryReader) =
         let signature = reader.ReadUInt32()
-        if signature = 0x04034b50u then
+        if signature = LOCAL_FILE_HEADER_SIGNATURE then
             let versionNeededToExtract = reader.ReadUInt16()
             let generalPurposeBitFlag = reader.ReadUInt16()
             let compressionMethod = reader.ReadUInt16()

@@ -181,28 +181,6 @@ let resScanner = MailboxProcessor<byte[] * byte[] * int64>.Start(fun inbox ->
     loop(false)
 )
 
-let are = new System.Threading.AutoResetEvent(false)
-let zipHeaderIdentifier() = MailboxProcessor<(byte[] * byte[] * int64) option>.Start(fun inbox ->
-    let fileName = Path.Combine(config.output_dir, $"offsets.adr")
-    let fileStream = File.OpenWrite(fileName)
-    let rec loop() = async {
-        match! inbox.Receive() with
-        | Some (res, buffer, position) -> 
-            res |> 
-                Array.iteri (fun i v ->
-                    let offset = position + (int64) i * 512L
-                    if v = 1uy then
-                        let offsetBytes = BitConverter.GetBytes(offset)
-                        fileStream.WriteAsync(offsetBytes, 0, offsetBytes.Length) |> Async.AwaitTask |> ignore
-                )
-        | None -> 
-            do! fileStream.FlushAsync() |> Async.AwaitTask
-            fileStream.Close()
-            are.Set() |> ignore
-        return! loop()
-    }
-    loop()
-)
 
 (*readBlock
     |> AsyncSeq.iter (fun (buffer, position) ->
@@ -226,6 +204,8 @@ if are.WaitOne() then*)
 ////    |> Seq.iter(fun (position, fileName) ->
 ////        printfn "position: %i, %s" position fileName)
 //printXMLUncompressedContent suspects
+
+/// Select sectors containing keywords
 let filterFound = MailboxProcessor<byte[] * byte[] * int64>.Start(fun inbox ->
     let rec loop() = async {
         let! (res, buffer, position) = inbox.Receive()
@@ -248,9 +228,11 @@ readBlock
     |> AsyncSeq.iterAsync (fun (buffer, position) -> async{
             let! res = scanner.Scan(buffer, position)
             filterFound.Post (res, buffer, position)
+            do! scanForLocalFileHeader (buffer, position)
         })
     |> Async.RunSynchronously
     // wait for the writer to finish
 storeSector.PostAndReply Complete
+storeLocalHeaderOffset.PostAndReply CompleteStoreOffset
 
 printfn "Elapsed: %A" sw.Elapsed
