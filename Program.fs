@@ -4,7 +4,6 @@ open Zip
 open IO
 
 open FSharp.Control
-open Brahma.FSharp
 
 type Msg =
     | MsgSector of (byte[] * int64)
@@ -16,6 +15,7 @@ let cts = new System.Threading.CancellationTokenSource()
 let handleCancelKeyPress (args: ConsoleCancelEventArgs) =
     printfn "Cancellation requested..."
     IO.cts.Cancel()
+    Zip.cts.Cancel()
     cts.Cancel()
     args.Cancel <- true
 
@@ -193,17 +193,8 @@ let resScanner = MailboxProcessor<byte[] * byte[] * int64>.Start(fun inbox ->
         (res, buffer, position) |> Some |> zipHeaderIdentifier.Post
         )
     |> Async.RunSynchronously
-if are.Reset() then
-    zipHeaderIdentifier.Post None
-if are.WaitOne() then*)
-//let suspects =
-//    identifyLFHPositions()
-//        |> Seq.map (fun (position, fileName) -> position, (System.Text.Encoding.UTF8.GetString(fileName)))
-//        |> Seq.filter(fun (_, fileName) -> fileName.EndsWith "document.xml")
-//        |> Seq.toList
-////    |> Seq.iter(fun (position, fileName) ->
-////        printfn "position: %i, %s" position fileName)
-//printXMLUncompressedContent suspects
+
+*)
 
 /// Select sectors containing keywords
 let filterFound = MailboxProcessor<byte[] * byte[] * int64>.Start(fun inbox ->
@@ -224,15 +215,61 @@ let scanner =
     else
         CPU.CPUStack(config.block_size, config.keywords, config.match_all)
 
-readBlock
-    |> AsyncSeq.iterAsync (fun (buffer, position) -> async{
-            let! res = scanner.Scan(buffer, position)
-            filterFound.Post (res, buffer, position)
-            do! scanForLocalFileHeader (buffer, position)
-        })
-    |> Async.RunSynchronously
-    // wait for the writer to finish
-storeSector.PostAndReply Complete
-storeLocalHeaderOffset.PostAndReply CompleteStoreOffset
+let hddImage = File.Open(config.input_file, FileMode.Open, FileAccess.Read)    
+let hddImageSize = 
+    hddImage.Length
+printfn "file size: %i" hddImageSize
+try
+    // Scip txt files scanning. Search in zip files only
+    if Environment.GetCommandLineArgs().Length < 2 then
+        let readBlockSize = config.block_size * 512
+        printfn "block size: %i" readBlockSize
 
+        readStream hddImageSize readBlockSize hddImage
+            |> AsyncSeq.iterAsync (fun (buffer, position) -> async{
+                    let! res = scanner.Scan(buffer, position)
+                    filterFound.Post (res, buffer, position)
+                    do! scanForLocalFileHeader (buffer, position)
+                })
+            |> Async.RunSynchronously
+
+    storeLocalHeaderOffset.PostAndReply CompleteStoreOffset
+
+    printfn "Searching in zip files..."
+    let zipBlockSize = 6*512
+    //let suspects =
+    identifyLFHPositions hddImage
+        |> Seq.iter (fun (position, fileName, uncompressedSize, decompressedStream) ->
+            try
+                if fileName.EndsWith ".zip" then
+                    try
+                        let buffer = Array.zeroCreate<byte> (int uncompressedSize)
+                        decompressedStream.Read(buffer, 0, int uncompressedSize) |> ignore
+                        File.WriteAllBytes(Path.Combine(config.output_dir, "zip", position.ToString() + " " + Path.GetFileName fileName), buffer)
+                    with ex ->
+                        printfn "Error reading zip file: %s \r\n %s" fileName ex.Message
+                else
+                    try
+                        readStream uncompressedSize zipBlockSize decompressedStream
+                            |> AsyncSeq.iterAsync (fun (buffer, position) -> async{
+                                    let! res = scanner.Scan(buffer, position)
+                                    filterFound.Post (res, buffer, position)
+                                })
+                            |> Async.RunSynchronously
+                    with ex ->
+                        printfn "Error reading zip file: %s \r\n %s" fileName ex.Message
+            finally
+                decompressedStream.Close()
+            )        
+
+    // wait for the writer to finish
+    storeSector.PostAndReply Complete
+
+            //|> Seq.filter(fun (_, fileName) -> fileName.EndsWith ".xml" || fileName.EndsWith ".doc" || fileName.EndsWith ".txt")
+    //        |> Seq.toList
+    //    |> Seq.iter(fun (position, fileName) ->
+    //        printfn "position: %i, %s" position fileName)
+   // printXMLUncompressedContent hddImage scanner suspects
+finally
+    hddImage.Close()
 printfn "Elapsed: %A" sw.Elapsed

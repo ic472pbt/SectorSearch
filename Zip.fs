@@ -1,10 +1,12 @@
 ﻿module Zip
+    open IStack
     open System
     open System.IO    
     open System.IO.Compression
     let LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50u
     let LOCAL_FILE_OFFSETS_FILENAME = "lh_offsets.adr"
 
+    let cts = new System.Threading.CancellationTokenSource()
     type ZipOffsetStorageMsg = 
         | StoreOffset of (int64 list * int64)
         | CompleteStoreOffset of AsyncReplyChannel<unit>
@@ -17,7 +19,7 @@
         let collectOffsets position = List.collect ((+) position >> getBytes >> Array.toList)
         let rec loop(buffer: byte list) = async {
             match! inbox.Receive() with
-            | StoreOffset (res, position) when buffer.Length > 256 -> 
+            | StoreOffset (res, position) when buffer.Length > 1024 -> 
                 do! fileStream.WriteAsync(buffer |> Array.ofList, 0, buffer.Length) |> Async.AwaitTask
                 let tail = collectOffsets position res
                 return! loop(tail)
@@ -33,6 +35,7 @@
         loop([])
     )
 
+    /// Detect local file header signature in a sector
     let detectLocalFileHeader (sector: ReadOnlyMemory<byte>, offset: int64) =
         use ms = new MemoryStream(sector.ToArray())
         use br = new BinaryReader(ms)
@@ -48,12 +51,13 @@
         if indexes.Length > 0 then
             storeLocalHeaderOffset.Post(StoreOffset(indexes, offset))
 
-    let scanForLocalFileHeader(buffer: byte [], position: int64) =
-            let sectors = buffer.Length / 512
+    /// Scan the cluster/block for local file headers
+    let scanForLocalFileHeader(cluster: byte [], position: int64) =
+            let sectors = cluster.Length / 512
             [0..sectors - 1]
                 |> List.map (fun i -> async {
                         let offset = i * 512
-                        let sector = ReadOnlyMemory<byte>(buffer, offset, 512)
+                        let sector = ReadOnlyMemory<byte>(cluster, offset, 512)
                         detectLocalFileHeader(sector, position + int64 offset)
                     })
                 |> Async.Parallel
@@ -73,29 +77,50 @@
             let uncompressedSize = reader.ReadUInt32()
             let fileNameLength = reader.ReadUInt16()
             let extraFieldLength = reader.ReadUInt16()
-            let fileName = reader.ReadBytes(int fileNameLength)
+            let filenameDecoder(b: byte array) = 
+                //if generalPurposeBitFlag &&& 1024us = 1024us then
+                    System.Text.Encoding.UTF8.GetString b
+                //else
+                //    System.Text.Encoding.ASCII.GetString b
+            let fileName = 
+                fileNameLength
+                    |> int
+                    |> reader.ReadBytes
+                    |> filenameDecoder
             let extraField = reader.ReadBytes(int extraFieldLength)
-            Some (versionNeededToExtract, generalPurposeBitFlag, compressionMethod, lastModFileTime, lastModFileDate, crc32, compressedSize, uncompressedSize, fileName, extraField)
+            // skip damaged or ZIP64 records
+            if fileName.Length < 2048 && compressedSize < UInt32.MaxValue && compressedSize > 0u then
+                Some (versionNeededToExtract, generalPurposeBitFlag, compressionMethod, lastModFileTime, lastModFileDate, crc32, compressedSize, uncompressedSize, fileName, extraField)
+            else
+                None
         else None
 
-    let identifyLFHPositions () =
+    let identifyLFHPositions (hddImage: FileStream) =
+        hddImage.Position <- 0L
         let positions = seq{
-            use hddImage = File.OpenRead(config.input_file)
             use hddReader = new BinaryReader(hddImage)
             use file = File.OpenRead(fileName)
             use reader = new BinaryReader(file)
-            while reader.BaseStream.Position < reader.BaseStream.Length do
+            while reader.BaseStream.Position < reader.BaseStream.Length && not cts.IsCancellationRequested do
                 let position = reader.ReadInt64()
                 hddImage.Seek(position, SeekOrigin.Begin) |> ignore                
                 match identifyLocalFileHeader hddReader with
-                | Some (versionNeededToExtract, generalPurposeBitFlag, compressionMethod, lastModFileTime, lastModFileDate, crc32, compressedSize, uncompressedSize, fileName, extraField) ->
-                    yield position, fileName
-                | None -> ()
+                | Some (versionNeededToExtract, generalPurposeBitFlag, 
+                        compressionMethod, lastModFileTime, lastModFileDate, crc32, 
+                        compressedSize, uncompressedSize, fileName, extraField) 
+                        when ([".class"; ".png"; ".gif"; ".jpg"; ".dll"; ".exe"; ".ico"; ".jpeg"; ".ogg";
+                                ".svg"; ".ttf"; ".pak"] 
+                                |> List.exists fileName.EndsWith |> not) ->
+                    printfn "%s %i" fileName compressedSize
+                    let compressedStream = hddReader.ReadBytes(min (int64 compressedSize) (10L*1024L*1024L) |> int) // 10Mb limit
+                    let ms = new MemoryStream(compressedStream)
+                    let decompressedStream = new DeflateStream(ms, CompressionMode.Decompress)
+                    yield position, fileName, int32 uncompressedSize, decompressedStream
+                | _ -> ()
         }
         positions
 
-    let printXMLUncompressedContent (positions: (int64 * string) list) =
-        use hddImage = File.OpenRead(config.input_file)
+    let printXMLUncompressedContent (hddImage: FileStream) (searcher: IStack) (positions: (int64 * string) list) =
         use hddReader = new BinaryReader(hddImage)
         positions
             |> List.iter (fun (position, fn) ->
@@ -104,13 +129,15 @@
                 | Some (versionNeededToExtract, generalPurposeBitFlag, compressionMethod, lastModFileTime, lastModFileDate, crc32, compressedSize, uncompressedSize, fileName, extraField) ->
                     printfn "%s %i" fn compressedSize
                     let content = hddReader.ReadBytes(int compressedSize)
-                    let ms = new MemoryStream(content)
+                    use ms = new MemoryStream(content)
                     try
-                        let zip = new DeflateStream(ms, CompressionMode.Decompress)
-                        let buffer = Array.zeroCreate<byte> (int uncompressedSize)
-                        zip.Read(buffer, 0, int uncompressedSize) |> ignore
-                        let content = System.Text.Encoding.UTF8.GetString(buffer)
-                        File.WriteAllText(Path.Combine(config.output_dir, position.ToString()), content)
+                        let content = 
+                            use zip = new DeflateStream(ms, CompressionMode.Decompress)
+                            let buffer = Array.zeroCreate<byte> (int uncompressedSize)
+                            zip.Read(buffer, 0, int uncompressedSize) |> ignore
+                            System.Text.Encoding.UTF8.GetString(buffer)
+                        if searcher.SearchIn content > 0 then
+                            File.WriteAllText(Path.Combine(config.output_dir, "zip", position.ToString() + " " + Path.GetFileName fileName), content)
                     with exn ->
                         printfn "Error: %s" exn.Message
                 | None -> ()
