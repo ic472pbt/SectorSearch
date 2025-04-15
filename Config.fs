@@ -10,3 +10,8 @@ module Config
         |> config.Load
     let signatures =
         config.signatures |> Seq.map (fun L -> L |> Seq.map (fun h -> Byte.Parse(h.[2..3], Globalization.NumberStyles.HexNumber)) |> Seq.toArray) |> Seq.toList
+    let keywords =
+        [
+            yield! config.keywords |> Seq.map (fun L -> Text.Encoding.ASCII.GetBytes(L)) |> Seq.toList            
+            yield! config.keywords |> Seq.map (fun L -> Text.Encoding.Unicode.GetBytes(L)) |> Seq.toList
+        ]

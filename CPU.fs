@@ -2,6 +2,12 @@
     open IStack
     open System
     open System.Collections.Generic
+    let maxNeedleLength = 
+        let keywordsMaxLength = Config.keywords |> List.map (fun A -> A.Length) |> List.max
+        let signaturesMaxLength = Config.signatures |> List.map (fun A -> A.Length) |> List.max
+        max keywordsMaxLength signaturesMaxLength            
+    let joinedNeedles = Config.keywords @ Config.signatures 
+
     type CPUStack(blocks, needles: IList<string>, matchAll) =
         inherit IStack(blocks, needles)
 
@@ -25,10 +31,15 @@
                 (needles |> Seq.filter s.Contains |> Seq.length)
 
         let inspectSector(sector: ReadOnlyMemory<byte>) =        
-            let span = sector.ToArray()
-            let s = System.Text.Encoding.ASCII.GetString(span)
-            let utf16 = System.Text.Encoding.Unicode.GetString(span)
-            searchNeedles s + searchNeedles utf16 + searchByteSeqs (span)
+            let haystack = sector.ToArray()
+            //let dft = DFT.DFTSearcher(haystack, maxNeedleLength)
+            //joinedNeedles
+            //    |> List.map (fun needle -> dft.Search(needle).Length)
+            //    |> List.sum
+
+            let s = System.Text.Encoding.ASCII.GetString(haystack)
+            let utf16 = System.Text.Encoding.Unicode.GetString(haystack)
+            searchNeedles s + searchNeedles utf16 + searchByteSeqs (haystack)
             
         override _.Scan(buffer: byte [], position: int64) =
             let sectors = buffer.Length / 512
