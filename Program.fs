@@ -1,5 +1,6 @@
 ﻿open System
 open System.IO
+open Doc
 open Zip
 open IO
 
@@ -22,13 +23,11 @@ let handleCancelKeyPress (args: ConsoleCancelEventArgs) =
 printfn "Press Ctrl+C to cancel the operation."
 Console.CancelKeyPress.Add(handleCancelKeyPress)
 
-[<EntryPoint>]
 printfn "keywords : %A" config.keywords
 if not <| Directory.Exists (config.output_dir) then
     Directory.CreateDirectory(config.output_dir) |> ignore
 if not <| Directory.Exists (Path.Combine(config.output_dir, "zip")) then
     Directory.CreateDirectory(Path.Combine(config.output_dir, "zip")) |> ignore
-
 
 let degreeOfParallelizm = System.Environment.ProcessorCount
 
@@ -113,67 +112,6 @@ let zipMatcher = MailboxProcessor<Msg>.Start(fun inbox ->
     loop(None)
 )
 
-/// Workers for keyword search
-let kwWorkers = [for _ in 1..degreeOfParallelizm / 2 -> kwMatcher()]
-//let zipWorkers = [for _ in 1..degreeOfParallelizm / 2 -> zipMatcher()]
-
-/// Balancer for workers
-let balancer = MailboxProcessor.Start(fun inbox ->
-    let rec loop workerIndex  = async {
-        match! inbox.Receive() with
-        | MsgSector (bytes, offset) -> 
-            kwWorkers[workerIndex].Post (bytes, offset)
-            return! loop ((workerIndex + 1) % kwWorkers.Length) // zipWorkerIndex
-        | C  -> 
-            zipMatcher.Post C
-            return! loop workerIndex // ((zipWorkerIndex + 1) % zipWorkers.Length)
-    }
-    loop 0 
-)
-
-let resScanner = MailboxProcessor<byte[] * byte[] * int64>.Start(fun inbox -> 
-    let rec loop(incomplete) = async{
-        let mutable newIncomplete = incomplete
-        let! res, buffer, position = inbox.Receive()
-        if incomplete then
-            //balancer.Post <| MsgCompleteCluster(buffer, position)
-            let mutable k = 0
-            while k < config.block_size && res.[k] < 3uy do
-                k <- k + 1
-            if k < config.block_size then
-                balancer.Post <| MsgCompleteCluster(buffer, position)
-            else
-                balancer.Post <| MsgMiss
-            newIncomplete <- false
-
-        res |> 
-            Array.iteri (fun i v ->
-                let offset = position + (int64) i * 512L
-                if v = 1uy then
-                    let sector = Array.zeroCreate<byte> 512
-                    System.Array.Copy(buffer, i * 512, sector, 0, 512)      
-                    balancer.Post <| MsgSector(sector, offset)
-                elif v = 2uy then
-                    printfn "zip file found at offset: %i" offset
-                    let mutable k = i + 1
-                    while k < config.block_size && res.[k] < 3uy do
-                        k <- k + 1
-                    let cluster = Array.zeroCreate<byte> <| 512 * (k - i)
-                    System.Array.Copy(buffer, i * 512, cluster, 0, 512 * (k - i))
-                    if k = config.block_size then
-                        printfn "zip incomplete at offset: %i" offset
-                        balancer.Post <| MsgIncompleteCluster(cluster, offset)
-                        newIncomplete <- true
-                    else
-                        printfn "zip complete at offset: %i" offset
-                        balancer.Post <| MsgCompleteCluster(cluster, offset)
-                        newIncomplete <- false
-              )
-
-        return! loop(newIncomplete)
-    }
-    loop(false)
-)
 
 /// Select sectors containing keywords
 let filterFound = MailboxProcessor<byte[] * byte[] * int64 * string option>.Start(fun inbox ->
@@ -196,7 +134,9 @@ let scanner: IStack.IStack =
     else
         cpuScanner
 
-let hddImage = File.Open(config.input_file, FileMode.Open, FileAccess.Read)    
+let docSearchingAgent = Doc.docSearchingAgentFabric(cpuScanner)
+
+let hddImage = File.Open(config.input_file, FileMode.Open, FileAccess.Read, FileShare.Read)    
 let hddImageSize = 
     hddImage.Length
 printfn "file size: %i" hddImageSize
@@ -221,7 +161,11 @@ try
                     if zipCandidates.Length > 0 then
                         do! scanForLocalFileHeader (buffer, position, zipCandidates)
                     if docCandidates.Length > 0 then
-                        do! scanDocs(buffer, position, docCandidates)
+                        let! docs = scanDocs(buffer, position, docCandidates)
+                        docs
+                            |> Array.iter (fun L -> 
+                                L |> List.tryHead |> Option.iter (Some >> docSearchingAgent.Post)
+                            )
                 })
             |> Async.RunSynchronously
 
@@ -270,5 +214,5 @@ try
     //        printfn "position: %i, %s" position fileName)
    // printXMLUncompressedContent hddImage scanner suspects
 finally
+    docSearchingAgent.Post None
     hddImage.Close()
-// printfn "Elapsed: %A" sw.Elapsed

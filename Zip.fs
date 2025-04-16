@@ -4,7 +4,6 @@
     open System.IO    
     open System.IO.Compression
     let LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50u // little endian
-    let DOC_SIGNATURE = 0xE11AB1A1E011CFD0UL      // little endian
     let LOCAL_FILE_OFFSETS_FILENAME = "lh_offsets.adr"
     let DOC_OFFSETS_FILENAME = "dc_offsets.adr"
 
@@ -69,21 +68,8 @@
                     )
         if indexes.Length > 0 then
             storeLocalHeaderOffset.Post(StoreZipOffset(indexes, offset))
-    /// Detect doc signature in a sector
-    let detectDoc (sector: ReadOnlyMemory<byte>, offset: int64) =
-        use ms = new MemoryStream(sector.ToArray())
-        use br = new BinaryReader(ms)
-        let indexes =
-            [0L .. int64(sector.Length - 9)]
-                |> List.choose (fun i ->
-                        ms.Seek(i, SeekOrigin.Begin) |> ignore
-                        let signature = br.ReadUInt64()
-                        if signature = DOC_SIGNATURE then
-                            Some i
-                        else None
-                    )
-        if indexes.Length > 0 then
-            storeLocalHeaderOffset.Post(StoreDocOffset(indexes, offset))
+
+
     /// Scan the cluster/block for local file headers
     let scanForLocalFileHeader(cluster: byte [], position: int64, candidates: int []) =
             candidates
@@ -94,16 +80,7 @@
                     })
                 |> Async.Parallel
                 |> Async.Ignore
-    /// Scan the cluster/block for doc signature
-    let scanDocs(cluster: byte [], position: int64, candidates: int []) =
-            candidates
-                |> Array.map (fun i -> async {
-                        let offset = i * 512
-                        let sector = ReadOnlyMemory<byte>(cluster, offset, 512)
-                        detectDoc(sector, position + int64 offset)
-                    })
-                |> Async.Parallel
-                |> Async.Ignore
+
 
     let fileName = Path.Combine(config.output_dir, LOCAL_FILE_OFFSETS_FILENAME)
     let identifyLocalFileHeader (reader: BinaryReader) =
@@ -163,26 +140,32 @@
         }
         positions
 
-    let printXMLUncompressedContent (hddImage: FileStream) (searcher: IStack) (positions: (int64 * string) list) =
-        use hddReader = new BinaryReader(hddImage)
-        positions
-            |> List.iter (fun (position, fn) ->
-                hddImage.Seek(position, SeekOrigin.Begin) |> ignore
+    let zipSearchingAgentFabric (searcher: IStack) = MailboxProcessor<int64 option>.Start(fun inbox ->
+       let hddImage = File.Open(config.input_file, FileMode.Open, FileAccess.Read, FileShare.Read)    
+       let hddReader = new BinaryReader(hddImage)
+       let rec loop() = async{
+           match! inbox.Receive() with
+           | Some position ->
+                hddReader.BaseStream.Seek(position, SeekOrigin.Begin) |> ignore
                 match identifyLocalFileHeader hddReader with
-                | Some (versionNeededToExtract, generalPurposeBitFlag, compressionMethod, lastModFileTime, lastModFileDate, crc32, compressedSize, uncompressedSize, fileName, extraField) ->
-                    printfn "%s %i" fn compressedSize
-                    let content = hddReader.ReadBytes(int compressedSize)
-                    use ms = new MemoryStream(content)
-                    try
-                        let content = 
-                            use zip = new DeflateStream(ms, CompressionMode.Decompress)
-                            let buffer = Array.zeroCreate<byte> (int uncompressedSize)
-                            zip.Read(buffer, 0, int uncompressedSize) |> ignore
-                            System.Text.Encoding.UTF8.GetString(buffer)
-                        if searcher.SearchIn content > 0 then
-                            File.WriteAllText(Path.Combine(config.output_dir, "zip", position.ToString() + " " + Path.GetFileName fileName), content)
-                    with exn ->
-                        printfn "Error: %s" exn.Message
-                | None -> ()
-            )
-
+                    | Some (versionNeededToExtract, generalPurposeBitFlag, compressionMethod, lastModFileTime, lastModFileDate, crc32, compressedSize, uncompressedSize, fileName, extraField) ->
+                        let content = hddReader.ReadBytes(int compressedSize)
+                        use ms = new MemoryStream(content)
+                        try
+                            let content = 
+                                use zip = new DeflateStream(ms, CompressionMode.Decompress)
+                                let buffer = Array.zeroCreate<byte> (int uncompressedSize)
+                                zip.Read(buffer, 0, int uncompressedSize) |> ignore
+                                System.Text.Encoding.UTF8.GetString(buffer)
+                            if searcher.SearchIn content > 0 then
+                                File.WriteAllText(Path.Combine(config.output_dir, "zip", position.ToString() + " " + Path.GetFileName fileName), content)
+                        with exn ->
+                            printfn "Error: %s" exn.Message
+                    | None -> ()
+           | _ ->  
+                hddImage.Close()
+                hddReader.Close()
+           return! loop()
+           }
+       loop()
+       )

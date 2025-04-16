@@ -4,7 +4,6 @@
     open System
     open System.Collections.Generic
 
-    let toLower (b: byte) : byte =  if b >= 65uy && b <= 90uy then b + 32uy else b
     let kernel =
         <@  // returns the number of found keywords in a sector   
             // only indicates zip local file header or .doc signature is present 
@@ -15,6 +14,8 @@
                 let i = range.GlobalID0               
                 let sectorOffset = i * 512
                 indicator[i] <- 0uy
+                let toLower (b: byte) : byte =  if b >= 65uy && b <= 90uy then b + 32uy else b
+                
                 for j = 0 to 504 do
                     let innerOffset = sectorOffset + j
                     // zip local file signature
