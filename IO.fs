@@ -5,17 +5,21 @@
 
     let cts = new System.Threading.CancellationTokenSource()
     type StorageMsg = 
-        | StoreSector of (byte[] * int * int64 * byte)
+        | StoreSector of (byte[] * int * int64 * byte * string option)
         | Complete of AsyncReplyChannel<unit>
    
-    let sw = System.Diagnostics.Stopwatch.StartNew()
 
     /// Read stream in blocks. Each block size is proportional to 512 bytes.
     let readStream fileSize blockSize (stream: Stream) = 
+        let sw = System.Diagnostics.Stopwatch.StartNew()
         let blocks = fileSize / (int64)blockSize
         printfn "blocks: %i" blocks
         asyncSeq{
+            let mutable prevPosition = 0L
             let mutable position = 0L
+            let slidingSpeed = 0.0
+            let mutable curMillis = sw.ElapsedMilliseconds
+            let mutable prevMillis = 0L
             let mutable len = 0L
             let readBuffer = Array.zeroCreate<byte> blockSize
             let! length = stream.ReadAsync(readBuffer, 0, blockSize) |> Async.AwaitTask
@@ -24,9 +28,15 @@
                 yield readBuffer, position
                 let currentBlock = position / (int64) blockSize
                 System.Console.CursorLeft <- 0
-                printf "position block: %i/%i (%.01f%%) speed: %.01fMb/s" 
+                curMillis <- sw.ElapsedMilliseconds
+                let curSpeed = float(position - prevPosition)/ 1.024 / 1024.0 / (float(curMillis - prevMillis))
+                printf "position block: %i/%i (%.01f%%) speed: %.01fMb/s ETA: %A Elapsed: %A" 
                     currentBlock blocks ((float)currentBlock/(float)blocks*100.0)
-                    ((float) position / 1024.0 / 1024.0 / sw.Elapsed.TotalSeconds)
+                    curSpeed
+                    (TimeSpan.FromMilliseconds((float)(blocks - currentBlock) * (float)(curMillis - prevMillis)))
+                    sw.Elapsed
+                prevMillis <- curMillis
+                prevPosition <- position
                 position <- position + len
                 let! length = stream.ReadAsync(readBuffer, 0, blockSize) |> Async.AwaitTask
                 len <- int64 length
@@ -44,9 +54,10 @@
                 outputFileStream.Close()
                 rc.Reply()
                 return ()
-            | StoreSector (bytes, start, position, cnt) ->
+            | StoreSector (bytes, start, position, cnt, info) ->
+                let info = info |> Option.defaultValue ""
                 // Write the bytes to the output file
-                let count = Text.Encoding.ASCII.GetBytes($"{position + int64 (start * 512)} cnt {cnt.ToString()}\r\n")
+                let count = Text.Encoding.ASCII.GetBytes($"{position + (int64 start * 512L)} cnt {cnt.ToString()} {info}\r\n")
                 do! outputFileStream.WriteAsync(count, 0, count.Length) |> Async.AwaitTask
                 do! outputFileStream.WriteAsync(bytes, start, 512) |> Async.AwaitTask
                 outputFileStream.Write(crlf, 0, 2)

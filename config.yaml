@@ -1,5 +1,6 @@
 ﻿input_file: "D:\\input.mfi"
 output_dir: "C:\\output"
+skip_hdd_scan: false # if true, skip HDD scan and process zip and doc offsets
 block_size: 1000000 # number of sectors per read. One sector is 512b 
 work_size: 128
 words_min: 10 # minimum number of words detected in a sector

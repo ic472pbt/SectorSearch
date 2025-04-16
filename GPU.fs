@@ -1,95 +1,105 @@
 ﻿module GPU
+    open IStack
     open Brahma.FSharp
-    let kernel_ =
-        <@
-            fun (range: Range1D) wordsMin wordsMax (array1: ClArray<byte>) (result: ClArray<byte>) ->
-                let i = range.GlobalID0
-                let mutable words = 0uy
-                let mutable state = 0uy
-                let mutable found = false
-                let mutable EOCD = false
-                let offset = i * 512
+    open System
+    open System.Collections.Generic
 
-                let isZip = array1.[offset + 0] = 0x50uy && array1.[offset + 1] = 0x4Buy && array1.[offset + 2] = 0x03uy && array1.[offset + 3] = 0x04uy
-                if isZip then // identify and handle zip files differently
-                    result.[i] <- 2uy
-                else // identify txt files
-                    let letterPredicate value = value >= 65uy && value <= 122uy
-                    let spacePredicate value = value = 32uy || value = 9uy 
-                    let crPredicate value = value = 10uy || value = 13uy
-                    let candidateFound words = words > (byte)wordsMin && words < (byte)wordsMax
-
-                    for j = 0 to 511 do
-                        let idx = offset + j
-                        if j + 3 < 512 then
-                            EOCD <- EOCD || (array1.[idx+3] = 0x06uy && array1.[idx + 2] = 0x05uy && array1.[idx + 1] = 0x4buy && array1.[idx] = 0x50uy)
-                        let value = array1.[idx]
-                        if state = 0uy then 
-                            if letterPredicate value then
-                                state <- 1uy // found first letter
-                        elif state = 1uy then
-                            if spacePredicate value then
-                                state <- 2uy // found space after word
-                                words <- words + 1uy
-                            elif crPredicate value then
-                                state <- 3uy // found end of line
-                                words <- words + 1uy
-                            elif letterPredicate value then
-                                state <- 1uy // found next letter
-                            else 
-                                found <- found || candidateFound words
-                                words <- 0uy
-                                state <- 0uy // found non-letter character
-                        elif state = 3uy || state = 2uy then
-                            if crPredicate value then
-                                state <- 3uy // found end of line
-                            elif spacePredicate value then
-                                state <- 2uy // found space after first word
-                            elif letterPredicate value then
-                                state <- 1uy // found next letter
-                            else
-                                found <- found || candidateFound words
-                                words <- 0uy
-                                state <- 0uy // found non-letter character
-
-                    result.[i] <- if found || candidateFound words then 1uy else 0uy
-                    if EOCD then
-                        result.[i] <- 3uy
+    let kernel =
+        <@  // returns the number of found keywords in a sector   
+            // only indicates zip local file header or .doc signature is present 
+            // assuming they can't share single sector
+            fun (range: Range1D) 
+                count (needles: ClArray<byte>) (needlesIndexes: ClArray<int>) // Store all neddles in a single array, and adress them by index
+                (cluster: ClArray<byte>) (indicator: ClArray<byte>) ->
+                let i = range.GlobalID0               
+                let sectorOffset = i * 512
+                indicator[i] <- 0uy
+                for j = 0 to 504 do
+                    let innerOffset = sectorOffset + j
+                    // zip local file signature
+                    let isLocalFileHeader =  
+                        cluster.[innerOffset + 3] = 0x04uy && 
+                        cluster.[innerOffset + 2] = 0x03uy && 
+                        cluster.[innerOffset + 1] = 0x4buy && 
+                        cluster.[innerOffset] = 0x50uy
+                    // doc file signature D0CF11E0A1B11AE1
+                    let isDoc = 
+                        cluster.[innerOffset] = 0xD0uy && 
+                        cluster.[innerOffset + 1] = 0xCFuy && 
+                        cluster.[innerOffset + 2] = 0x11uy && 
+                        cluster.[innerOffset + 3] = 0xE0uy && 
+                        cluster.[innerOffset + 4] = 0xA1uy && 
+                        cluster.[innerOffset + 5] = 0xB1uy && 
+                        cluster.[innerOffset + 6] = 0x1Auy && 
+                        cluster.[innerOffset + 7] = 0xE1uy    
+                    // using high values for local file header and doc file signature
+                    if isLocalFileHeader then
+                        indicator.[i] <- 100uy
+                    if isDoc then
+                        indicator.[i] <- 200uy
+                if indicator[i] = 0uy then
+                    // search for keywords
+                    for k = 0 to count - 1 do
+                        let mutable matches = 0uy
+                        let needleOffset = needlesIndexes.[k]
+                        let needleLength = needlesIndexes.[k+1] - needlesIndexes.[k] 
+                        for j = 0 to 511 - needleLength + 1 do
+                            let mutable found = true
+                            let innerOffset = sectorOffset + j
+                            for l = 0 to needleLength - 1 do
+                                found <- found && (cluster.[innerOffset + l] = needles.[needleOffset + l])
+                            // using low numbers for keywords
+                            if found then
+                                matches <- matches + 1uy
+                        if matches > 0uy then
+                            indicator.[i] <- indicator.[i] + 1uy
         @>
-    let device = ClDevice.GetFirstAppropriateDevice()
-    printfn "device: %s" device.Name
-    printfn "max work size: %i" device.MaxWorkGroupSize
-    let context = ClContext(device)
-    let mainQueue = context.QueueProvider.CreateQueue()
 
-    let arrayScan (clContext: ClContext) wordsMin wordsMax workGroupSize =
-        let kernel =
-            <@
-                fun (range: Range1D) wordsMin wordsMax (array1: ClArray<byte>) (result: ClArray<byte>) ->
-                    let i = range.GlobalID0
-                    let offset = i * 512
-                    let mutable zheader = false
+    type GPUStack(blocks, needles: IList<string>, matchAll) =
+        inherit IStack(blocks, needles)
+        let workGroupSize = config.work_size
+        let device = ClDevice.GetFirstAppropriateDevice()
+        do
+            printfn "device: %s" device.Name
+            printfn "max work size: %i" device.MaxWorkGroupSize
+            printfn "work group size: %i" workGroupSize
+        let context = ClContext(device)
+        let mainQueue = context.QueueProvider.CreateQueue()
+        let needlesCombined = Config.keywords @ Config.signatures
+        let byteNeedles = needlesCombined |> Seq.concat |> Seq.toArray
+        let needlesIndexes = 
+            needlesCombined 
+                |> List.map (Array.length) 
+                |> List.scan (fun acc x -> acc + x) 0
+                |> List.toArray
+        let searchNeedles (s:string) =
+            if matchAll then
+                if (needles |> Seq.forall s.Contains) then needles.Count else 0
+            else
+                (needles |> Seq.filter s.Contains |> Seq.length)
+        override _.Scan(buffer: byte [], position: int64) =
+            use clByte = context.CreateClArray<byte>(buffer)
 
-                    for j = 0 to 511 do
-                        let idx = offset + j
-                        if j < 509 then
-                            zheader <- zheader ||  (array1.[idx+3] = 0x04uy && array1.[idx + 2] = 0x03uy && array1.[idx + 1] = 0x4buy && array1.[idx] = 0x50uy)
-                    result.[i] <- if zheader then 1uy else 0uy
-            @>
-    
-        let kernel = clContext.Compile kernel
-        fun (commandQueue: MailboxProcessor<_>) (inputArray1: ClArray<byte>) ->
-            let ndRange = Range1D.CreateValid(config.block_size, workGroupSize)
-            let outputArray = clContext.CreateClArray(config.block_size, allocationMode = AllocationMode.Default)
+            let kernel = context.Compile kernel
+            let arrayScan (context: ClContext) workGroupSize =
+                fun (commandQueue: MailboxProcessor<_>) (inputArray1: ClArray<byte>) ->
+                    let ndRange = Range1D.CreateValid(config.block_size, workGroupSize)
+                    let outputArray = context.CreateClArray(config.block_size, allocationMode = AllocationMode.Default)
+                    let needles = context.CreateClArray<byte>(byteNeedles)
+                    let needlesIndexes = context.CreateClArray<int>(needlesIndexes)
+                    let kernel = kernel.GetKernel()
 
-            let kernel = kernel.GetKernel()
+                    commandQueue.Post(
+                        Msg.MsgSetArguments
+                            (fun () -> kernel.KernelFunc ndRange (Config.keywords.Length) needles needlesIndexes inputArray1 outputArray)
+                    )
 
-            commandQueue.Post(
-                Msg.MsgSetArguments
-                    (fun () -> kernel.KernelFunc ndRange wordsMin wordsMax inputArray1 outputArray)
-            )
+                    commandQueue.Post(Msg.CreateRunMsg<_, _> kernel)
 
-            commandQueue.Post(Msg.CreateRunMsg<_, _> kernel)
-
-            outputArray
-
+                    outputArray
+            let intArrayScan = arrayScan context workGroupSize
+            use intRes = intArrayScan mainQueue clByte
+            let resOnHost = Array.zeroCreate config.block_size
+            let res = mainQueue.PostAndReply(fun ch -> Msg.CreateToHostMsg(intRes, resOnHost, ch))
+            async {return res}
+        override _.SearchIn (arg: string): int = searchNeedles arg        

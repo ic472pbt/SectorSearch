@@ -1,7 +1,8 @@
 {
   "profiles": {
     "ss": {
-      "commandName": "Project"
+      "commandName": "Project",
+      "commandLineArgs": "sddas"
     }
   }
 }

@@ -30,12 +30,6 @@ if not <| Directory.Exists (Path.Combine(config.output_dir, "zip")) then
     Directory.CreateDirectory(Path.Combine(config.output_dir, "zip")) |> ignore
 
 
-let wordsMin = config.words_min
-let wordsMax = config.words_max
-
-let workGroupSize = config.work_size
-printfn "work group size: %i" workGroupSize
-
 let degreeOfParallelizm = System.Environment.ProcessorCount
 
 /// Do keyword search in block
@@ -181,39 +175,26 @@ let resScanner = MailboxProcessor<byte[] * byte[] * int64>.Start(fun inbox ->
     loop(false)
 )
 
-
-(*readBlock
-    |> AsyncSeq.iter (fun (buffer, position) ->
-        printfn "position: %i" position
-        use clIntA1 = context.CreateClArray<byte>(buffer)
-        let intArrayScan = arrayScan context workGroupSize
-        use intRes = intArrayScan mainQueue clIntA1
-        let resOnHost = Array.zeroCreate config.block_size
-        let res = mainQueue.PostAndReply(fun ch -> Msg.CreateToHostMsg(intRes, resOnHost, ch))
-        (res, buffer, position) |> Some |> zipHeaderIdentifier.Post
-        )
-    |> Async.RunSynchronously
-
-*)
-
 /// Select sectors containing keywords
-let filterFound = MailboxProcessor<byte[] * byte[] * int64>.Start(fun inbox ->
+let filterFound = MailboxProcessor<byte[] * byte[] * int64 * string option>.Start(fun inbox ->
+    let wordsLimit = (byte)config.min_words
     let rec loop() = async {
-        let! (res, buffer, position) = inbox.Receive()
+        let! (res, buffer, position, info) = inbox.Receive()
         res |> Array.iteri (fun i wordsCount ->
-            if wordsCount > (byte)config.min_words then
-                storeSector.Post <| StoreSector(buffer, i * 512, position, wordsCount)
+            if wordsCount >= wordsLimit && wordsCount < 100uy then
+                storeSector.Post <| StoreSector(buffer, i * 512, position, wordsCount, info)
         )
         return! loop()
     }
     loop()
 )
 
-let scanner = 
+let cpuScanner = CPU.CPUStack(config.block_size, config.keywords, config.match_all)
+let scanner: IStack.IStack = 
     if config.use_gpu then
-        CPU.CPUStack(config.block_size, config.keywords, config.match_all)
+        GPU.GPUStack(config.block_size, config.keywords, config.match_all)
     else
-        CPU.CPUStack(config.block_size, config.keywords, config.match_all)
+        cpuScanner
 
 let hddImage = File.Open(config.input_file, FileMode.Open, FileAccess.Read)    
 let hddImageSize = 
@@ -221,15 +202,26 @@ let hddImageSize =
 printfn "file size: %i" hddImageSize
 try
     // Scip txt files scanning. Search in zip files only
-    if Environment.GetCommandLineArgs().Length < 2 then
+    if not config.skip_hdd_scan then
         let readBlockSize = config.block_size * 512
         printfn "block size: %i" readBlockSize
 
         readStream hddImageSize readBlockSize hddImage
             |> AsyncSeq.iterAsync (fun (buffer, position) -> async{
                     let! res = scanner.Scan(buffer, position)
-                    filterFound.Post (res, buffer, position)
-                    do! scanForLocalFileHeader (buffer, position)
+                    filterFound.Post (res, buffer, position, None)
+                    let zipCandidates = 
+                        res 
+                            |> Array.mapi (fun i v -> if v = 100uy then Some i else None)
+                            |> Array.choose id
+                    let docCandidates = 
+                        res 
+                            |> Array.mapi (fun i v -> if v = 200uy then Some i else None)
+                            |> Array.choose id
+                    if zipCandidates.Length > 0 then
+                        do! scanForLocalFileHeader (buffer, position, zipCandidates)
+                    if docCandidates.Length > 0 then
+                        do! scanDocs(buffer, position, docCandidates)
                 })
             |> Async.RunSynchronously
 
@@ -241,19 +233,26 @@ try
     identifyLFHPositions hddImage
         |> Seq.iter (fun (position, fileName, uncompressedSize, decompressedStream) ->
             try
-                if fileName.EndsWith ".zip" then
+                if fileName.EndsWith ".zip" || fileName.EndsWith ".gz" then
+                    let targetFn = Path.Combine(config.output_dir, "zip", position.ToString() + " " + Path.GetFileName fileName)
+                    let file = File.Open(targetFn, FileMode.Create, FileAccess.Write)
                     try
-                        let buffer = Array.zeroCreate<byte> (int uncompressedSize)
-                        decompressedStream.Read(buffer, 0, int uncompressedSize) |> ignore
-                        File.WriteAllBytes(Path.Combine(config.output_dir, "zip", position.ToString() + " " + Path.GetFileName fileName), buffer)
-                    with ex ->
-                        printfn "Error reading zip file: %s \r\n %s" fileName ex.Message
+                        try
+                            decompressedStream.CopyTo(file, 1024)
+                        with ex ->
+                            printfn "Error reading zip file: %s \r\n %s" fileName ex.Message
+                    finally
+                         file.Flush()
+                         let fileSize = file.Length
+                         file.Close()              
+                         if fileSize = 0 then File.Delete targetFn                            
                 else
                     try
                         readStream uncompressedSize zipBlockSize decompressedStream
                             |> AsyncSeq.iterAsync (fun (buffer, position) -> async{
-                                    let! res = scanner.Scan(buffer, position)
-                                    filterFound.Post (res, buffer, position)
+                                    let! res = cpuScanner.Scan(buffer, position)
+                                    let info = Some (sprintf "%s %i" fileName position)
+                                    filterFound.Post (res, buffer, position, info)
                                 })
                             |> Async.RunSynchronously
                     with ex ->
@@ -272,4 +271,4 @@ try
    // printXMLUncompressedContent hddImage scanner suspects
 finally
     hddImage.Close()
-printfn "Elapsed: %A" sw.Elapsed
+// printfn "Elapsed: %A" sw.Elapsed
