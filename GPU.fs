@@ -4,6 +4,7 @@
     open System
     open System.Collections.Generic
 
+    let toLower (b: byte) : byte =  if b >= 65uy && b <= 90uy then b + 32uy else b
     let kernel =
         <@  // returns the number of found keywords in a sector   
             // only indicates zip local file header or .doc signature is present 
@@ -47,7 +48,8 @@
                             let mutable found = true
                             let innerOffset = sectorOffset + j
                             for l = 0 to needleLength - 1 do
-                                found <- found && (cluster.[innerOffset + l] = needles.[needleOffset + l])
+                                found <- found && 
+                                    (toLower cluster.[innerOffset + l] = toLower needles.[needleOffset + l])
                             // using low numbers for keywords
                             if found then
                                 matches <- matches + 1uy
