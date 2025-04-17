@@ -13,6 +13,9 @@ type Msg =
     | MsgMiss
 let cts = new System.Threading.CancellationTokenSource()
 
+// read windows-1251 encoding from doc
+System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance)
+
 let handleCancelKeyPress (args: ConsoleCancelEventArgs) =
     printfn "Cancellation requested..."
     IO.cts.Cancel()
@@ -117,10 +120,11 @@ let zipMatcher = MailboxProcessor<Msg>.Start(fun inbox ->
 let filterFound = MailboxProcessor<byte[] * byte[] * int64 * string option>.Start(fun inbox ->
     let wordsLimit = (byte)config.min_words
     let rec loop() = async {
-        let! (res, buffer, position, info) = inbox.Receive()
+        let! (res, buffer, clusterPosition, info) = inbox.Receive()
         res |> Array.iteri (fun i wordsCount ->
             if wordsCount >= wordsLimit && wordsCount < 100uy then
-                storeSector.Post <| StoreSector(buffer, i * 512, position, wordsCount, info)
+                let sectorPosition = i * 512
+                storeSector.Post <| StoreSector(buffer, sectorPosition, clusterPosition, wordsCount, info)
         )
         return! loop()
     }
@@ -193,10 +197,10 @@ try
                 else
                     try
                         readStream uncompressedSize zipBlockSize decompressedStream
-                            |> AsyncSeq.iterAsync (fun (buffer, position) -> async{
-                                    let! res = cpuScanner.Scan(buffer, position)
-                                    let info = Some (sprintf "%s %i" fileName position)
-                                    filterFound.Post (res, buffer, position, info)
+                            |> AsyncSeq.iterAsync (fun (buffer, clusterPosition) -> async{
+                                    let! res = cpuScanner.Scan(buffer, clusterPosition)
+                                    let info = Some (sprintf "%s %i" fileName clusterPosition)
+                                    filterFound.Post (res, buffer, clusterPosition, info)
                                 })
                             |> Async.RunSynchronously
                     with ex ->
@@ -207,12 +211,6 @@ try
 
     // wait for the writer to finish
     storeSector.PostAndReply Complete
-
-            //|> Seq.filter(fun (_, fileName) -> fileName.EndsWith ".xml" || fileName.EndsWith ".doc" || fileName.EndsWith ".txt")
-    //        |> Seq.toList
-    //    |> Seq.iter(fun (position, fileName) ->
-    //        printfn "position: %i, %s" position fileName)
-   // printXMLUncompressedContent hddImage scanner suspects
 finally
     docSearchingAgent.Post None
     hddImage.Close()

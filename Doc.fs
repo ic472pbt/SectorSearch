@@ -10,9 +10,6 @@
     if not <| Directory.Exists (Path.Combine(config.output_dir, "doc")) then
         Directory.CreateDirectory(Path.Combine(config.output_dir, "doc")) |> ignore
     
-    // read windows-1251 encoding from doc
-    System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance)
-
     /// Detect doc signature in a sector
     let detectDoc (sector: ReadOnlyMemory<byte>, offset: int64) =
         use ms = new MemoryStream(sector.ToArray())
@@ -49,7 +46,7 @@
             | Some position -> 
                 hddImage.Seek(position, SeekOrigin.Begin) |> ignore
                 try
-                    let buffer = Array.zeroCreate<byte> <| 1024 * 1024 * 40 // 40Mb
+                    let buffer = Array.zeroCreate<byte> <| 1024 * 1024 * 20 // 20Mb
                     let! len = hddImage.ReadAsync(buffer, 0, buffer.Length) |> Async.AwaitTask
                     use ms = new MemoryStream(buffer, 0, len)
                     let doc = HWPFDocument(ms)

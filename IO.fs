@@ -54,12 +54,12 @@
                 outputFileStream.Close()
                 rc.Reply()
                 return ()
-            | StoreSector (bytes, start, position, cnt, info) ->
+            | StoreSector (bytes, sectorPosition, clusterPosition, cnt, info) ->
                 let info = info |> Option.defaultValue ""
                 // Write the bytes to the output file
-                let count = Text.Encoding.ASCII.GetBytes($"{position + (int64 start * 512L)} cnt {cnt.ToString()} {info}\r\n")
+                let count = Text.Encoding.ASCII.GetBytes($"{clusterPosition + (int64 sectorPosition)} cnt {cnt.ToString()} {info}\r\n")
                 do! outputFileStream.WriteAsync(count, 0, count.Length) |> Async.AwaitTask
-                do! outputFileStream.WriteAsync(bytes, start, 512) |> Async.AwaitTask
+                do! outputFileStream.WriteAsync(bytes, sectorPosition, 512) |> Async.AwaitTask
                 outputFileStream.Write(crlf, 0, 2)
                 outputFileStream.Write(crlf, 0, 2)
                 return! loop()

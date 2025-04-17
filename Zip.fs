@@ -129,7 +129,7 @@
                         compressedSize, uncompressedSize, fileName, extraField) 
                         // ignore irrelevant files
                         when ([".class"; ".png"; ".gif"; ".jpg"; ".dll"; ".exe"; ".ico"; ".jpeg"; ".ogg";
-                                ".svg"; ".ttf"; ".pak"; ".dex"] 
+                                ".svg"; ".ttf"; ".pak"; ".dex"; ".so"] 
                                 |> List.exists fileName.EndsWith |> not) ->
                     printfn "%s %i" fileName compressedSize
                     let compressedStream = hddReader.ReadBytes(min (int64 compressedSize) (10L*1024L*1024L) |> int) // 10Mb limit
