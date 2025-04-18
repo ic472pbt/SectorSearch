@@ -44,9 +44,9 @@
         override _.Scan(buffer: byte [], position: int64) =
             let sectors = buffer.Length / 512
             [0..sectors - 1]
-                |> List.map (fun i -> async{
+                |> List.map (fun i -> 
                         let sector = ReadOnlyMemory<byte>(buffer, i * 512, 512)
-                        return inspectSector(sector) |> byte
-                    })
-                |> Async.Parallel
+                        inspectSector(sector) |> byte
+                    )
+                |> List.toArray
         override _.SearchIn (arg: string): int = searchNeedles arg            

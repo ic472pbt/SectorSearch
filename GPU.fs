@@ -104,5 +104,5 @@
             use intRes = intArrayScan mainQueue clByte
             let resOnHost = Array.zeroCreate config.block_size
             let res = mainQueue.PostAndReply(fun ch -> Msg.CreateToHostMsg(intRes, resOnHost, ch))
-            async {return res}
+            res
         override _.SearchIn (arg: string): int = searchNeedles arg        

@@ -1,8 +1,11 @@
 ﻿module Zip
     open IStack
+    open Filter
     open System
     open System.IO    
     open System.IO.Compression
+    open FSharp.Control
+
     let LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50u // little endian
     let LOCAL_FILE_OFFSETS_FILENAME = "lh_offsets.adr"
     let DOC_OFFSETS_FILENAME = "dc_offsets.adr"
@@ -12,6 +15,7 @@
         | StoreZipOffset of (int64 list * int64)
         | StoreDocOffset of (int64 list * int64)
         | CompleteStoreOffset of AsyncReplyChannel<unit>
+    let logger = NLog.LogManager.GetCurrentClassLogger()
     let inline getBytes (i : int64) = BitConverter.GetBytes i
 
     /// Store offsets of local zip file headers for later processing
@@ -63,12 +67,12 @@
                         ms.Seek(i, SeekOrigin.Begin) |> ignore
                         let signature = br.ReadUInt32()
                         if signature = LOCAL_FILE_HEADER_SIGNATURE then
-                            Some i
+                            Some <| int64 i + offset
                         else None
                     )
         if indexes.Length > 0 then
             storeLocalHeaderOffset.Post(StoreZipOffset(indexes, offset))
-
+        indexes
 
     /// Scan the cluster/block for local file headers
     let scanForLocalFileHeader(cluster: byte [], position: int64, candidates: int []) =
@@ -76,11 +80,9 @@
                 |> Array.map (fun i -> async {
                         let offset = i * 512
                         let sector = ReadOnlyMemory<byte>(cluster, offset, 512)
-                        detectLocalFileHeader(sector, position + int64 offset)
+                        return detectLocalFileHeader(sector, position + int64 offset)
                     })
                 |> Async.Parallel
-                |> Async.Ignore
-
 
     let fileName = Path.Combine(config.output_dir, LOCAL_FILE_OFFSETS_FILENAME)
     let identifyLocalFileHeader (reader: BinaryReader) =
@@ -131,7 +133,7 @@
                         when ([".class"; ".png"; ".gif"; ".jpg"; ".dll"; ".exe"; ".ico"; ".jpeg"; ".ogg";
                                 ".svg"; ".ttf"; ".pak"; ".dex"; ".so"] 
                                 |> List.exists fileName.EndsWith |> not) ->
-                    printfn "%s %i" fileName compressedSize
+                    logger.Info(sprintf "found %s %i" fileName compressedSize)
                     let compressedStream = hddReader.ReadBytes(min (int64 compressedSize) (10L*1024L*1024L) |> int) // 10Mb limit
                     let ms = new MemoryStream(compressedStream)
                     let decompressedStream = new DeflateStream(ms, CompressionMode.Decompress)
@@ -139,8 +141,9 @@
                 | _ -> ()
         }
         positions
-
-    let zipSearchingAgentFabric (searcher: IStack) = MailboxProcessor<int64 option>.Start(fun inbox ->
+    
+    let zipBlockSize = 6*512
+    let zipSearchingAgentFabric (searcher: IStack, are: Threading.AutoResetEvent) = MailboxProcessor<int64 option>.Start(fun inbox ->
        let hddImage = File.Open(config.input_file, FileMode.Open, FileAccess.Read, FileShare.Read)    
        let hddReader = new BinaryReader(hddImage)
        let rec loop() = async{
@@ -148,23 +151,51 @@
            | Some position ->
                 hddReader.BaseStream.Seek(position, SeekOrigin.Begin) |> ignore
                 match identifyLocalFileHeader hddReader with
-                    | Some (versionNeededToExtract, generalPurposeBitFlag, compressionMethod, lastModFileTime, lastModFileDate, crc32, compressedSize, uncompressedSize, fileName, extraField) ->
-                        let content = hddReader.ReadBytes(int compressedSize)
-                        use ms = new MemoryStream(content)
+                    | Some (versionNeededToExtract, generalPurposeBitFlag, compressionMethod, 
+                            lastModFileTime, lastModFileDate, crc32, 
+                            compressedSize, uncompressedSize, fileName, extraField)
+                        // ignore irrelevant files
+                        when ([".class"; ".png"; ".gif"; ".jpg"; ".dll"; ".exe"; ".ico"; ".jpeg"; ".ogg";
+                                ".svg"; ".ttf"; ".pak"; ".dex"; ".so"] 
+                                |> List.exists fileName.EndsWith |> not) ->
+                        logger.Info(sprintf "found %s %i" fileName compressedSize)
                         try
-                            let content = 
-                                use zip = new DeflateStream(ms, CompressionMode.Decompress)
-                                let buffer = Array.zeroCreate<byte> (int uncompressedSize)
-                                zip.Read(buffer, 0, int uncompressedSize) |> ignore
-                                System.Text.Encoding.UTF8.GetString(buffer)
-                            if searcher.SearchIn content > 0 then
-                                File.WriteAllText(Path.Combine(config.output_dir, "zip", position.ToString() + " " + Path.GetFileName fileName), content)
+                            let compressedStream = hddReader.ReadBytes(min (int64 compressedSize) (10L*1024L*1024L) |> int) // 10Mb limit
+                            use ms = new MemoryStream(compressedStream)
+                            use decompressedStream = new DeflateStream(ms, CompressionMode.Decompress)
+                            if fileName.EndsWith ".zip" || fileName.EndsWith ".gz" then
+                                let targetFn = Path.Combine(config.output_dir, "zip", position.ToString() + " " + Path.GetFileName fileName)
+                                let file = File.Open(targetFn, FileMode.Create, FileAccess.Write)
+                                try
+                                    try
+                                        decompressedStream.CopyTo(file, 1024)
+                                        Log.loggerAgent.Post(Log.ZipsProcessed 1)
+                                    with ex ->
+                                        logger.Error(ex, sprintf "Error reading zip file: %s" fileName)
+                                finally
+                                     file.Flush()
+                                     let fileSize = file.Length
+                                     file.Close()              
+                                     if fileSize = 0 then File.Delete targetFn                            
+                            else
+                                try
+                                    IO.readStream false (int64 uncompressedSize) zipBlockSize decompressedStream
+                                        |> AsyncSeq.iter (fun (buffer, clusterPosition) -> 
+                                                let res = searcher.Scan(buffer, clusterPosition)
+                                                let info = Some (sprintf "%s %i" fileName clusterPosition)
+                                                filterFound.Post (res, buffer, clusterPosition, info)
+                                            )
+                                        |> Async.RunSynchronously
+                                    Log.loggerAgent.Post(Log.ZipsProcessed 1)
+                                with ex ->
+                                    logger.Error(ex, sprintf "Error reading zip file: %s" fileName)
                         with exn ->
-                            printfn "Error: %s" exn.Message
-                    | None -> ()
+                            logger.Error(exn)
+                    | _ -> ()
            | _ ->  
                 hddImage.Close()
                 hddReader.Close()
+                are.Set() |> ignore
            return! loop()
            }
        loop()

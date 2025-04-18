@@ -10,10 +10,10 @@
    
 
     /// Read stream in blocks. Each block size is proportional to 512 bytes.
-    let readStream fileSize blockSize (stream: Stream) = 
+    let readStream report fileSize blockSize (stream: Stream) = 
         let sw = System.Diagnostics.Stopwatch.StartNew()
         let blocks = fileSize / (int64)blockSize
-        printfn "blocks: %i" blocks
+        if report then printfn "blocks: %i" blocks
         asyncSeq{
             let mutable prevPosition = 0L
             let mutable position = 0L
@@ -27,14 +27,15 @@
             while len > 0 && not cts.IsCancellationRequested do
                 yield readBuffer, position
                 let currentBlock = position / (int64) blockSize
-                System.Console.CursorLeft <- 0
                 curMillis <- sw.ElapsedMilliseconds
                 let curSpeed = float(position - prevPosition)/ 1.024 / 1024.0 / (float(curMillis - prevMillis))
-                printf "position block: %i/%i (%.01f%%) speed: %.01fMb/s ETA: %A Elapsed: %A" 
-                    currentBlock blocks ((float)currentBlock/(float)blocks*100.0)
-                    curSpeed
-                    (TimeSpan.FromMilliseconds((float)(blocks - currentBlock) * (float)(curMillis - prevMillis)))
-                    sw.Elapsed
+                if report then
+                    Log.loggerAgent.Post <| Log.Progress(
+                        sprintf "block %i/%i (%.01f%%) spd %.01fMb/s ETA %s Elapsed %s" 
+                            currentBlock blocks ((float)currentBlock/(float)blocks*100.0)
+                            curSpeed
+                            ((TimeSpan.FromMilliseconds((float)(blocks - currentBlock) * (float)(curMillis - prevMillis))).ToString(@"hh\:mm\:ss"))
+                            (sw.Elapsed.ToString(@"hh\:mm\:ss")))
                 prevMillis <- curMillis
                 prevPosition <- position
                 position <- position + len
@@ -45,7 +46,7 @@
     let storeSector = MailboxProcessor<StorageMsg>.Start(fun inbox ->
         let crlf = System.Text.Encoding.ASCII.GetBytes("\r\n")
         let outputFile = Path.Combine(config.output_dir, "sectors_txt.bin")
-        let outputFileStream = File.Open(outputFile, FileMode.Create, FileAccess.Write)
+        let outputFileStream = File.Open(outputFile, FileMode.Create, FileAccess.Write, FileShare.Read)
         let rec loop() = async {
             let! msg = inbox.Receive()
             match msg with
@@ -62,6 +63,7 @@
                 do! outputFileStream.WriteAsync(bytes, sectorPosition, 512) |> Async.AwaitTask
                 outputFileStream.Write(crlf, 0, 2)
                 outputFileStream.Write(crlf, 0, 2)
+                do! outputFileStream.FlushAsync() |> Async.AwaitTask
                 return! loop()
         }
         loop()

@@ -9,6 +9,7 @@
 
     if not <| Directory.Exists (Path.Combine(config.output_dir, "doc")) then
         Directory.CreateDirectory(Path.Combine(config.output_dir, "doc")) |> ignore
+    let logger = NLog.LogManager.GetCurrentClassLogger()
     
     /// Detect doc signature in a sector
     let detectDoc (sector: ReadOnlyMemory<byte>, offset: int64) =
@@ -51,13 +52,14 @@
                     use ms = new MemoryStream(buffer, 0, len)
                     let doc = HWPFDocument(ms)
                     let extractor = WordExtractor(doc)
+                    Log.loggerAgent.Post(Log.DocsProcessed 1)
 
                     let content = extractor.Text
                    // if searcher.SearchIn content > 0 then
                     File.WriteAllText(Path.Combine(config.output_dir, "doc", position.ToString() + ".txt"), content)
                     File.WriteAllBytes(Path.Combine(config.output_dir, "doc", position.ToString() + ".doc"), buffer)
                 with ex -> 
-                    printfn "Error reading document at position %d: %s" position ex.Message
+                    logger.Error(ex, sprintf "Error reading document at position %d" position)
             | _ -> hddImage.Close()
             return! loop()
         }

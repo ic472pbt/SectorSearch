@@ -7,13 +7,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Config.fs" />
+    <Compile Include="NLog.fs" />
     <Compile Include="DFT.fs" />
     <Compile Include="IStack.fs" />
-    <Compile Include="Config.fs" />
-    <Compile Include="Zip.fs" />
-    <Compile Include="Doc.fs" />
     <Compile Include="IO.fs" />
     <Compile Include="CPU.fs" />
+    <Compile Include="Filter.fs" />
+    <Compile Include="Zip.fs" />
+    <Compile Include="Doc.fs" />
+    <Compile Include="Init.fs" />
     <Compile Include="GPU.fs" />
     <Compile Include="Searcher.fs" />
     <Content Include="config.yaml">
@@ -36,6 +39,7 @@
     <PackageReference Include="FSharp.Control.AsyncSeq" Version="3.2.1" />
     <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
     <PackageReference Include="MathNet.Numerics.FSharp" Version="5.0.0" />
+    <PackageReference Include="NLog" Version="5.4.0" />
     <PackageReference Include="NPOI" Version="2.3.0" />
     <PackageReference Include="NPOI.HWPF" Version="2.3.0" />
     <PackageReference Include="System.Configuration.ConfigurationManager" Version="9.0.4" />
